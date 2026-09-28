@@ -1,223 +1,228 @@
 # ASO Node Recovery
 
-Production-oriented, safety-first controller that replaces remote 3X-UI nodes on demand when their
-public IP becomes unreachable from Iran.
+**Automatic VPS node recovery and replacement system.** When a 3X-UI proxy node becomes unreachable from Iran, ASO automatically provisions a replacement VPS, verifies it's reachable from Iran, deploys 3X-UI on it, and swaps it into your panel — all without manual intervention.
 
-Current release: **1.5.8-node-event-notifications** — context-rich Telegram node/replacement alerts.
+## How It Works
 
-## Core replacement invariant
-
-There is no permanent spare VPS/IP pool. A replacement VPS is created only after a node reaches the
-configured failure threshold. The old VPS stays alive until the replacement has passed:
-
-1. provider provisioning,
-2. Iran reachability check,
-3. SSH readiness,
-4. 3X-UI install/config extraction,
-5. node API verification,
-6. Master 3X-UI update,
-7. Master verification,
-8. final Iran health check.
-
-Only then may the old VPS be deleted.
-
-## Implemented architecture
-
-- FastAPI health/control process
-- PostgreSQL + SQLAlchemy 2 + Alembic
-- Check-Host monitoring from Iran nodes
-- central Node state machine and persisted replacement state machine
-- Hetzner and Linode provider adapters
-- DRY_RUN + independent real-mutation guard + capacity/cost guards
-- AsyncSSH deployment and isolated 3X-UI installer
-- current 3X-UI Master API integration
-- crash recovery, deterministic provider reconciliation, DB leases and advisory lock
-- Telegram control plane with allow-list, inline Node/Provider management, validated secret rotation, and signed destructive confirmations
-- persistent pause/resume
-- signed/idempotent Force Repair that bypasses only the initial FAILED-state admission check
-- audit/event notifications
-- context-rich Telegram node/replacement notifications with node/provider/VPS identity
-- PostgreSQL backup/restore tooling
-- hardened production Docker Compose
-- separated explicitly-authorized production replacement E2E test
-
-## Runtime monitoring and repair controls
-
-Authorized Telegram operators can manage runtime behavior without rebuilding containers:
-
-- each node: `DISABLED`, `MONITOR ONLY`, or `AUTO REPAIR`,
-- global monitoring on/off,
-- global automatic-repair worker on/off,
-- runtime `DRY RUN` / `LIVE` selection.
-
-Telegram controls can only make the process as permissive as the host allows. `LIVE` is refused unless
-server-side DRY_RUN, mutation, and emergency-stop gates already permit real infrastructure changes.
-Automatic repair only considers nodes explicitly set to `AUTO REPAIR`; `MONITOR ONLY` never triggers
-automatic replacement. Old-VPS deletion remains independently protected.
-
-Force Repair is available from the node Telegram UI or `/force <id|name>`. It does not skip new-IP,
-SSH/3X-UI, Master, final-health, concurrency, or old-VPS deletion safety gates. See
-[Force Repair](docs/FORCE_REPAIR.md).
-
-## Safety defaults
-
-```env
-ASO_DRY_RUN=true
-ASO_ALLOW_REAL_INFRASTRUCTURE_MUTATION=false
-ASO_ALLOW_OLD_VPS_DELETION=false
-ASO_REPLACEMENT_EMERGENCY_STOP=true
-ASO_REPLACEMENT_WORKER_ENABLED=false
-ASO_WORKER_SCHEDULER_ENABLED=false
-ASO_TELEGRAM_BOT_ENABLED=false
-ASO_ALLOW_DATABASE_RESTORE=false
+```
+Node goes down → Check-Host confirms (from Iran) → ASO creates new VPS → 
+Wait for SSH ready → Deploy 3X-UI → Verify from Iran → Update Master panel → Old VPS deleted
 ```
 
-Installing the release does **not** authorize real VPS creation/deletion or Master mutation.
+**Key invariant:** The old VPS is only deleted after the replacement passes all verification steps:
+1. Provider provisioning complete
+2. Reachable from outside Iran
+3. Reachable from **inside Iran** (critical!)
+4. SSH ready and accessible
+5. 3X-UI installed and configured
+6. Node API verified
+7. Master panel updated
+8. Final health check passed
+
+## Features
+
+- 🚀 **Automatic replacement** — No permanent spare VPS needed; creates on-demand
+- 🇮🇷 **Iran reachability verification** — Uses Check-Host.net nodes inside Iran
+- 🔒 **Safety-first design** — DRY_RUN mode, multiple kill switches, emergency stop
+- 💬 **Telegram control plane** — Manage everything from a Telegram bot
+- 📊 **Monitoring** — Continuous health checks with configurable thresholds
+- 🔄 **Multi-provider** — Supports Hetzner and Linode
+- 🛡️ **Hardened Docker deployment** — Security-focused production setup
+- 💾 **Backup/restore** — PostgreSQL backup tooling
+
+## Quick Installation
+
+The smart installer auto-detects your system, installs Docker if needed, generates secure random passwords, and only asks for credentials it can't generate on its own.
+
+```bash
+# Clone the repository
+git clone https://github.com/anon7vip/aso-node-recovery.git
+cd aso-node-recovery
+
+# Run the installer (interactive)
+sudo ./install.sh
+
+# Or non-interactive (auto-generates everything, skips prompts)
+sudo ./install.sh --non-interactive
+```
+
+**What the installer does automatically:**
+- Detects your OS and architecture
+- Checks hardware requirements (2GB+ RAM, 1+ CPU, 10GB+ disk)
+- Installs Docker & Compose if missing (Ubuntu/Debian)
+- Generates secure PostgreSQL password
+- Generates Telegram callback secret
+- Creates `.env` with safe defaults
+- Builds Docker images
+- Starts PostgreSQL and runs database migrations
+- Starts the API service and verifies health
+
+**What it will ask you for (optional, can skip):**
+- Telegram Bot Token (for bot control)
+- Your Telegram User ID (for authorization)
+- Master 3X-UI Base URL and credentials
+- Hetzner/Linode API tokens
+
+All other configuration values are auto-detected or use safe defaults.
+
+### Manual Installation (Docker)
+
+If you prefer manual setup:
+
+```bash
+# Copy environment template
+cp .env.example .env
+
+# Edit .env with your configuration
+nano .env
+
+# Start PostgreSQL
+docker compose up -d postgres
+
+# Wait for DB, then run migrations
+docker compose exec -T postgres pg_isready -U aso && \
+docker compose run --rm api alembic upgrade head
+
+# Start services
+docker compose up -d api worker
+```
+
+## Configuration
+
+All configuration is done through the `.env` file. Key settings:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASO_DRY_RUN` | `true` | Safety mode — no real VPS changes |
+| `ASO_TELEGRAM_BOT_TOKEN` | *(empty)* | Telegram bot token for control plane |
+| `ASO_MASTER_3XUI_BASE_URL` | *(empty)* | Your 3X-UI panel URL |
+| `ASO_HETZNER_API_TOKEN` | *(empty)* | Hetzner Cloud API token |
+| `ASO_LINODE_API_TOKEN` | *(empty)* | Linode API token |
+| `ASO_CHECK_HOST_COUNTRY_CODE` | `ir` | Country code for reachability checks |
+| `ASO_FAILURE_THRESHOLD` | `3` | Failed checks before declaring node down |
+| `ASO_SSH_VERIFY_HOST_KEY` | `false` | SSH host key verification (off for ephemeral VPS) |
+
+**Safety guards (keep disabled until ready):**
+- `ASO_DRY_RUN=true` — Change to `false` only when you want real VPS operations
+- `ASO_ALLOW_REAL_INFRASTRUCTURE_MUTATION=false` — Must be true for real changes
+- `ASO_ALLOW_OLD_VPS_DELETION=false` — Independent guard for deleting old VPS
+
+## Operational Commands
+
+The `asoctl` script provides convenient management commands:
+
+```bash
+./asoctl status          # Check service status
+./asoctl logs            # View application logs
+./asoctl restart         # Restart all services
+./asoctl stop            # Stop all services
+./asoctl backup          # Create database backup
+./asoctl restore         # Restore from backup
+./asoctl setup           # Interactive onboarding wizard
+```
+
+## Telegram Bot Control
+
+Once configured with a bot token, control ASO via Telegram:
+
+- `/start` — Main menu
+- `/nodes` — List all nodes and their status
+- `/providers` — Manage VPS providers
+- `/health` — Check system health
+- `/force <id>` — Force repair a specific node
+- `/pause` / `/resume` — Pause/resume monitoring
+
+Each node can be set to:
+- **AUTO REPAIR** — Automatically replace when down
+- **MONITOR ONLY** — Alert but don't replace
+- **DISABLED** — No monitoring
+
+## Upgrade
+
+```bash
+git pull --ff-only
+./asoctl upgrade
+```
+
+The upgrade process:
+1. Creates a backup of the database
+2. Rebuilds Docker images
+3. Runs database migrations
+4. Restarts services
+5. Verifies health
+
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│ Check-Host  │────▶│ Monitoring   │────▶│ Replacement │
+│ (Iran nodes)│     │ Worker       │     │ Orchestrator│
+└─────────────┘     └──────────────┘     └─────────────┘
+                                               │
+┌─────────────┐     ┌──────────────┐          ▼
+│ Telegram    │◀────│ Control Plane│     ┌─────────────┐
+│ Bot         │     │ (FastAPI)    │◀────│ PostgreSQL  │
+└─────────────┘     └──────────────┘     └─────────────┘
+                                               │
+                    ┌──────────────────────────▼──────────────────────┐
+                    │              Provider Adapters                  │
+                    │        (Hetzner Cloud / Linode API)             │
+                    └──────────────────────────┬──────────────────────┘
+                                               │
+                    ┌──────────────────────────▼──────────────────────┐
+                    │           SSH Deployment Pipeline               │
+                    │   OS detect → Bootstrap → Install 3X-UI → Verify│
+                    └─────────────────────────────────────────────────┘
+```
+
+## Safety Model
+
+ASO follows defense-in-depth with multiple independent safety layers:
+
+1. **DRY_RUN mode** — Default; simulates all operations without making changes
+2. **Real mutation guard** — Independent flag that must be explicitly enabled
+3. **Old VPS deletion guard** — Separate flag and confirmation phrase required
+4. **Emergency stop** — `ASO_REPLACEMENT_EMERGENCY_STOP=true` halts all replacement activity
+5. **Capacity guards** — Limits on concurrent replacements and temporary servers
+6. **Lease system** — Prevents duplicate operations during crashes
 
 ## Development
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+pip install -e '.[dev]'
 cp .env.example .env
 
+# Run tests
 pytest
+
+# Lint and format
 ruff check .
 ruff format --check .
-python scripts/validate_patch17.py
-python -m compileall -q app tests scripts migrations
-alembic upgrade head --sql > migration.sql
-```
 
-Development API:
-
-```bash
+# Run API in development mode
 uvicorn app.main:app --reload
 ```
 
-Health endpoint: `GET /health`.
+## Requirements
 
-## Database
+- Docker Engine + Compose plugin
+- Ubuntu/Debian (recommended) or any Linux with Docker
+- 2GB+ RAM, 1+ CPU, 10GB+ disk space
+- Outbound HTTPS access for provider APIs and Telegram
 
-Apply all migrations before starting worker/bot processes:
+## Documentation
 
-```bash
-alembic upgrade head
-```
-
-Current Alembic head: `20260919_0006`.
-
-## Quick installation
-
-For a fresh Ubuntu/Debian production host, the simplest safe bootstrap is:
-
-```bash
-chmod +x install.sh asoctl scripts/*.sh
-sudo ./install.sh
-```
-
-The installer provisions Docker/Compose when required, creates a protected `.env`, generates local
-secrets, starts PostgreSQL, applies migrations, runs the security review, starts the safe production
-stack, and verifies `/health`. It **always** leaves real infrastructure mutation and replacement workers
-disabled. For a same-server 3X-UI Master, the installer also checks Docker-to-host connectivity and, only when UFW is active and the configured Master resolves to this host, inserts a narrow source-subnet/bridge/port rule before verifying the connection. Remote Master firewall policy is never modified. See [Quick installation](docs/QUICK_INSTALL.md).
-
-## Operational onboarding
-
-A fresh installation intentionally starts with an empty provider/node registry. Register the existing infrastructure before expecting Telegram `/nodes` or `/providers` to show anything:
-
-```bash
-./asoctl setup
-./asoctl registry
-./asoctl telegram-check
-```
-
-Then open the bot and send `/start`. See [Operational onboarding](docs/ONBOARDING.md).
-
-## Smart onboarding
-
-After installation, register existing infrastructure with read-only discovery:
-
-```bash
-./asoctl setup
-```
-
-Provider region/type/image and Node host/port/basePath are discovered from the provider API and
-Master 3X-UI rather than typed manually. Provider access, Master probe, and the current Node API
-token are validated before registry persistence. See [Smart onboarding](docs/SMART_ONBOARDING.md).
-
-## Telegram registry management
-
-The same smart onboarding is available from Telegram `/start` → **Nodes** / **Providers**. Operators
-can add, inspect, test, rename, rotate provider/Node API credentials, rotate SSH credentials and
-remove local ASO registry records through inline buttons. Provider/Master/VPS discovery and access
-validation run before persistence. Registry removal never deletes provider infrastructure and never
-modifies the Master node.
-
-## In-place upgrades
-
-Once ASO is installed, do **not** rerun the installer for routine releases. Update the checkout and let
-`asoctl` rebuild the Docker image, migrate the existing database, recreate the application containers,
-and validate the new release while preserving `.env` and every named volume:
-
-```bash
-git config core.fileMode false
-git pull --ff-only
-./asoctl upgrade
-```
-
-A pre-upgrade PostgreSQL backup is created by default. Use `--skip-backup` only when you intentionally
-accept proceeding without that backup. The upgrade command never runs `down -v`, prunes volumes,
-resets PostgreSQL, regenerates `.env`, or enables destructive VPS/Master operations. See
-[In-place upgrades](docs/UPGRADE.md).
-
-
-### Same-host Master and SSH trust
-
-When ASO and the central 3X-UI panel share one server, the installer/upgrade path detects the actual ASO Docker subnet and may add only a narrow UFW allow rule from that subnet to the configured Master TCP port. Remote-Master deployments are left untouched.
-
-Node onboarding follows `ASO_SSH_VERIFY_HOST_KEY`. It defaults to `false` for ephemeral/recycled VPS IPs, avoiding stale `known_hosts` conflicts. Operators can set it to `true` to require explicit SHA256 fingerprint confirmation and persist the exact host/port key in ASO's trust store.
-
-## Production
-
-See:
-
-- [Operational onboarding](docs/ONBOARDING.md)
-- [Production deployment](docs/PRODUCTION.md)
-- [Telegram control](docs/TELEGRAM.md)
-- [API health diagnostics](docs/API_HEALTH.md)
-- [Backup/restore](docs/BACKUP_RESTORE.md)
-- [Security controls](docs/SECURITY.md)
-- [Release checklist](docs/RELEASE.md)
-- [Replacement workflow](docs/REPLACEMENT.md)
+- [Quick Installation Guide](docs/QUICK_INSTALL.md)
+- [Operational Onboarding](docs/ONBOARDING.md)
+- [Production Deployment](docs/PRODUCTION.md)
+- [Telegram Control](docs/TELEGRAM.md)
+- [Replacement Workflow](docs/REPLACEMENT.md)
+- [Backup & Restore](docs/BACKUP_RESTORE.md)
+- [Security Controls](docs/SECURITY.md)
 - [Force Repair](docs/FORCE_REPAIR.md)
-- [Master 3X-UI](docs/MASTER_3XUI.md)
 
-Start the hardened stack only after `.env` is populated:
+## License
 
-```bash
-docker compose -f docker-compose.prod.yml up -d postgres
-docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
-docker compose -f docker-compose.prod.yml up -d api worker
-docker compose -f docker-compose.prod.yml --profile telegram up -d bot
-```
-
-Keep real-infrastructure guards disabled through initial monitoring, Telegram, backup, restore-drill,
-and DRY_RUN verification.
-
-### In-place validation and SSH trust
-
-`./asoctl upgrade` validates the checked-out source through a read-only bind mount, so production images remain lean and do not need `tests/` copied into `/app`. When `ASO_SSH_VERIFY_HOST_KEY=true`, an untrusted SSH host key triggers Telegram fingerprint confirmation. When it is `false`, SSH skips the managed `known_hosts` check, which is intended for short-lived replacement VPS instances.
-
-### SSH host-key policy
-
-`ASO_SSH_VERIFY_HOST_KEY=false` is the default for short-lived replacement VPS instances where
-provider IPs can be recycled with new SSH host keys. In this mode AsyncSSH does not consult the
-managed `known_hosts` file. Set the option to `true` when strict identity pinning is desired; ASO then
-uses explicit Telegram/CLI fingerprint confirmation and pins the confirmed SHA256 host key.
-
-### AsyncSSH host-key probe compatibility
-
-The read-only SSH host-key probe is bounded by `asyncio.wait_for()` and no longer passes
-unsupported timeout keywords to `asyncssh.get_server_host_key()`. This keeps fingerprint
-confirmation compatible across the supported AsyncSSH 2.x range while retaining a hard probe timeout.
+See the repository for license information.
