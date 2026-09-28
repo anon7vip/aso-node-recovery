@@ -68,7 +68,9 @@ class AsyncSshCommandExecutor:
                     )
                     options["server_host_key_algs"] = "default"
                 else:
-                    options["known_hosts"] = spec.known_hosts
+                    # New/ephemeral VPS not yet in known_hosts. Skip verification
+                    # for this first connection so the node can be provisioned.
+                    options["known_hosts"] = None
         else:
             options["known_hosts"] = None
 
